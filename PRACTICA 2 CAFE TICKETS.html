@@ -1,0 +1,776 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gestión de Tickets de Café - Exportación de Café S.A. de C.V.</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script type="module">
+        // Importa las funciones necesarias de los SDKs de Firebase
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.8.1/firebase-app.js";
+        import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, sendPasswordResetEmail, onAuthStateChanged, signOut, signInWithCustomToken, signInAnonymously } from "https://www.gstatic.com/firebasejs/11.8.1/firebase-auth.js";
+        import { getFirestore, collection, addDoc, onSnapshot, deleteDoc, doc, query, orderBy, getDocs } from "https://www.gstatic.com/firebasejs/11.8.1/firebase-firestore.js";
+
+        // Configuración de Firebase (se usará la configuración global si está disponible)
+        // Se asume que __app_id, __firebase_config, y __initial_auth_token están disponibles globalmente
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+
+        // Inicializa Firebase
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+
+        let currentUserId = null; // Almacena el ID del usuario autenticado
+        let ticketsChart; // Variable para la instancia del gráfico
+
+        // Función para obtener la referencia a la colección de tickets del usuario actual
+        const getTicketsCollectionRef = (userId) => {
+            return collection(db, `artifacts/${appId}/users/${userId}/tickets`);
+        };
+
+        // Autenticación inicial: intenta iniciar sesión con el token personalizado o de forma anónima
+        if (typeof __initial_auth_token !== 'undefined') {
+            signInWithCustomToken(auth, __initial_auth_token).then(() => {
+                console.log("Sesión iniciada con token personalizado.");
+            }).catch((error) => {
+                console.error("Error al iniciar sesión con token personalizado:", error);
+                signInAnonymously(auth); // Retorno a inicio de sesión anónimo si falla
+            });
+        } else {
+            signInAnonymously(auth).then(() => {
+                console.log("Sesión iniciada de forma anónima.");
+            }).catch((error) => {
+                console.error("Error al iniciar sesión de forma anónima:", error);
+            });
+        }
+
+        // Listener para cambios en el estado de autenticación
+        onAuthStateChanged(auth, (user) => {
+            const loginSection = document.getElementById('login-section');
+            const appSection = document.getElementById('app-section');
+            const currentUserIdDisplay = document.getElementById('current-user-id');
+
+            if (user) {
+                currentUserId = user.uid;
+                loginSection.classList.add('d-none');
+                appSection.classList.remove('d-none');
+                currentUserIdDisplay.textContent = `ID de Usuario: ${currentUserId}`;
+                // Inicia la escucha de tickets para este usuario
+                listenForTickets();
+            } else {
+                currentUserId = null;
+                loginSection.classList.remove('d-none');
+                appSection.classList.add('d-none');
+                currentUserIdDisplay.textContent = '';
+                // Limpia los tickets y el gráfico si no hay usuario
+                document.getElementById('ticket-list').innerHTML = '';
+                if (ticketsChart) {
+                    ticketsChart.destroy();
+                }
+            }
+        });
+
+        // --- Funciones de Autenticación ---
+        window.registerUser = async () => {
+            const email = document.getElementById('registerEmail').value;
+            const password = document.getElementById('registerPassword').value;
+            try {
+                await createUserWithEmailAndPassword(auth, email, password);
+                showMessage('Registro exitoso. ¡Bienvenido!', 'success');
+            } catch (error) {
+                showMessage(`Error de registro: ${error.message}`, 'danger');
+            }
+        };
+
+        window.loginUser = async () => {
+            const email = document.getElementById('loginEmail').value;
+            const password = document.getElementById('loginPassword').value;
+            try {
+                await signInWithEmailAndPassword(auth, email, password);
+                showMessage('Inicio de sesión exitoso.', 'success');
+            } catch (error) {
+                showMessage(`Error de inicio de sesión: ${error.message}`, 'danger');
+            }
+        };
+
+        window.resetPassword = async () => {
+            const email = document.getElementById('forgotEmail').value;
+            if (!email) {
+                showMessage('Por favor, ingresa tu correo electrónico para restablecer la contraseña.', 'warning');
+                return;
+            }
+            try {
+                await sendPasswordResetEmail(auth, email);
+                showMessage('Se ha enviado un correo electrónico para restablecer la contraseña. Revisa tu bandeja de entrada.', 'info');
+            } catch (error) {
+                showMessage(`Error al restablecer contraseña: ${error.message}`, 'danger');
+            }
+        };
+
+        window.logoutUser = async () => {
+            try {
+                await signOut(auth);
+                showMessage('Sesión cerrada correctamente.', 'info');
+            } catch (error) {
+                showMessage(`Error al cerrar sesión: ${error.message}`, 'danger');
+            }
+        };
+
+        // --- Funciones de Gestión de Tickets ---
+
+        // Genera un folio único para el ticket
+        const generateFolio = () => {
+            return `COFFEE-${Date.now().toString().slice(-6)}-${Math.random().toString(36).substring(2, 6).toUpperCase()}`;
+        };
+
+        window.createTicket = async () => {
+            if (!currentUserId) {
+                showMessage('Debes iniciar sesión para crear tickets.', 'danger');
+                return;
+            }
+
+            const title = document.getElementById('ticketTitle').value;
+            const description = document.getElementById('ticketDescription').value;
+            const priority = document.getElementById('ticketPriority').value;
+            const status = document.getElementById('ticketStatus').value;
+            const clientName = document.getElementById('clientName').value;
+            const kilograms = document.getElementById('kilograms').value;
+            const productType = document.getElementById('productType').value;
+            const country = document.getElementById('country').value;
+
+            if (!title || !description || !clientName || !kilograms || !productType || !country) {
+                showMessage('Por favor, completa todos los campos del ticket.', 'warning');
+                return;
+            }
+            if (isNaN(kilograms) || parseFloat(kilograms) <= 0) {
+                showMessage('Los kilogramos de café deben ser un número positivo.', 'warning');
+                return;
+            }
+
+            try {
+                const folio = generateFolio();
+                await addDoc(getTicketsCollectionRef(currentUserId), {
+                    folio: folio,
+                    title: title,
+                    description: description,
+                    priority: priority,
+                    status: status,
+                    clientName: clientName,
+                    kilograms: parseFloat(kilograms),
+                    productType: productType,
+                    country: country,
+                    createdAt: new Date()
+                });
+                showMessage('Ticket creado exitosamente.', 'success');
+                // Limpiar el formulario
+                document.getElementById('ticketForm').reset();
+            } catch (error) {
+                showMessage(`Error al crear ticket: ${error.message}`, 'danger');
+            }
+        };
+
+        // Escucha en tiempo real los cambios en los tickets
+        const listenForTickets = () => {
+            if (!currentUserId) return;
+
+            onSnapshot(getTicketsCollectionRef(currentUserId), (snapshot) => {
+                const tickets = [];
+                snapshot.forEach(doc => {
+                    tickets.push({ id: doc.id, ...doc.data() });
+                });
+                displayTickets(tickets);
+                updateChart(tickets);
+            }, (error) => {
+                console.error("Error al escuchar tickets:", error);
+                showMessage(`Error al cargar tickets: ${error.message}`, 'danger');
+            });
+        };
+
+        // Muestra los tickets en la interfaz
+        const displayTickets = (tickets) => {
+            const ticketList = document.getElementById('ticket-list');
+            ticketList.innerHTML = ''; // Limpia la lista antes de volver a renderizar
+
+            if (tickets.length === 0) {
+                ticketList.innerHTML = '<p class="text-center text-muted mt-4">No hay tickets disponibles. ¡Crea uno nuevo!</p>';
+                return;
+            }
+
+            // Ordenar tickets por fecha de creación (más recientes primero)
+            tickets.sort((a, b) => b.createdAt.toDate() - a.createdAt.toDate());
+
+            tickets.forEach(ticket => {
+                const card = document.createElement('div');
+                card.classList.add('col-md-6', 'col-lg-4', 'mb-4');
+                card.innerHTML = `
+                    <div class="card h-100 shadow-sm border-${getPriorityColorClass(ticket.priority)}">
+                        <div class="card-header bg-${getPriorityColorClass(ticket.priority)} text-white">
+                            <h5 class="mb-0"><i class="fas fa-tag"></i> Folio: ${ticket.folio}</h5>
+                        </div>
+                        <div class="card-body">
+                            <h6 class="card-subtitle mb-2 text-muted"><i class="fas fa-coffee"></i> ${ticket.title}</h6>
+                            <p class="card-text small">${ticket.description}</p>
+                            <ul class="list-group list-group-flush">
+                                <li class="list-group-item"><i class="fas fa-exclamation-triangle"></i> <strong>Prioridad:</strong> <span class="badge bg-${getPriorityBadgeColor(ticket.priority)}">${ticket.priority}</span></li>
+                                <li class="list-group-item"><i class="fas fa-info-circle"></i> <strong>Estado:</strong> <span class="badge bg-${ticket.status === 'Abierto' ? 'success' : 'secondary'}">${ticket.status}</span></li>
+                                <li class="list-group-item"><i class="fas fa-user"></i> <strong>Cliente:</strong> ${ticket.clientName}</li>
+                                <li class="list-group-item"><i class="fas fa-weight-hanging"></i> <strong>Kilogramos:</strong> ${ticket.kilograms} kg</li>
+                                <li class="list-group-item"><i class="fas fa-seedling"></i> <strong>Tipo:</strong> ${ticket.productType}</li>
+                                <li class="list-group-item"><i class="fas fa-globe"></i> <strong>País:</strong> ${ticket.country}</li>
+                                <li class="list-group-item"><i class="fas fa-calendar-alt"></i> <strong>Creado:</strong> ${new Date(ticket.createdAt.toDate()).toLocaleDateString()}</li>
+                            </ul>
+                        </div>
+                        <div class="card-footer bg-light d-flex justify-content-end">
+                            <button class="btn btn-danger btn-sm" onclick="deleteTicket('${ticket.id}')"><i class="fas fa-trash-alt"></i> Eliminar</button>
+                        </div>
+                    </div>
+                `;
+                ticketList.appendChild(card);
+            });
+        };
+
+        // Helper para obtener la clase de color del borde de la tarjeta
+        const getPriorityColorClass = (priority) => {
+            switch (priority) {
+                case 'Alta': return 'danger';
+                case 'Media': return 'warning';
+                case 'Baja': return 'info';
+                default: return 'secondary';
+            }
+        };
+
+        // Helper para obtener el color del badge de prioridad
+        const getPriorityBadgeColor = (priority) => {
+            switch (priority) {
+                case 'Alta': return 'danger';
+                case 'Media': return 'warning';
+                case 'Baja': return 'success'; // Usar success para Baja para un contraste visual
+                default: return 'secondary';
+            }
+        };
+
+        window.deleteTicket = async (ticketId) => {
+            if (!currentUserId) {
+                showMessage('Debes iniciar sesión para eliminar tickets.', 'danger');
+                return;
+            }
+            // Usar un modal de confirmación en lugar de alert/confirm
+            showConfirmationModal('¿Estás seguro de que quieres eliminar este ticket?', async () => {
+                try {
+                    await deleteDoc(doc(getTicketsCollectionRef(currentUserId), ticketId));
+                    showMessage('Ticket eliminado exitosamente.', 'success');
+                } catch (error) {
+                    showMessage(`Error al eliminar ticket: ${error.message}`, 'danger');
+                }
+            });
+        };
+
+        // --- Funciones de Exportación de Datos ---
+        window.exportToExcel = async () => {
+            if (!currentUserId) {
+                showMessage('Debes iniciar sesión para exportar datos.', 'danger');
+                return;
+            }
+
+            try {
+                const querySnapshot = await getDocs(getTicketsCollectionRef(currentUserId));
+                let tickets = [];
+                querySnapshot.forEach(doc => {
+                    tickets.push(doc.data());
+                });
+
+                if (tickets.length === 0) {
+                    showMessage('No hay tickets para exportar.', 'info');
+                    return;
+                }
+
+                // Encabezados del CSV
+                const headers = [
+                    "Folio", "Título del Pedido", "Descripción del Pedido", "Prioridad", "Estado",
+                    "Nombre del Cliente", "Kilogramos de Café", "Tipo de Producto", "País de Envío", "Fecha de Creación"
+                ];
+
+                // Mapear datos a filas CSV
+                const rows = tickets.map(ticket => [
+                    `"${ticket.folio}"`,
+                    `"${ticket.title.replace(/"/g, '""')}"`, // Escapar comillas dobles
+                    `"${ticket.description.replace(/"/g, '""')}"`,
+                    `"${ticket.priority}"`,
+                    `"${ticket.status}"`,
+                    `"${ticket.clientName.replace(/"/g, '""')}"`,
+                    ticket.kilograms,
+                    `"${ticket.productType}"`,
+                    `"${ticket.country}"`,
+                    `"${new Date(ticket.createdAt.toDate()).toLocaleString()}"`
+                ]);
+
+                let csvContent = headers.join(',') + '\n' + rows.map(e => e.join(',')).join('\n');
+
+                const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+                const link = document.createElement('a');
+                if (link.download !== undefined) { // Feature detection
+                    const url = URL.createObjectURL(blob);
+                    link.setAttribute('href', url);
+                    link.setAttribute('download', 'tickets_cafe.csv');
+                    link.style.visibility = 'hidden';
+                    document.body.appendChild(link);
+                    link.click();
+                    document.body.removeChild(link);
+                    showMessage('Tickets exportados a tickets_cafe.csv', 'success');
+                } else {
+                    showMessage('Tu navegador no soporta la descarga de archivos directamente.', 'warning');
+                }
+            } catch (error) {
+                showMessage(`Error al exportar tickets: ${error.message}`, 'danger');
+            }
+        };
+
+        // --- Funciones de Estadísticas Gráficas ---
+        const updateChart = (tickets) => {
+            const priorityCounts = { 'Alta': 0, 'Media': 0, 'Baja': 0 };
+
+            tickets.forEach(ticket => {
+                if (priorityCounts.hasOwnProperty(ticket.priority)) {
+                    priorityCounts[ticket.priority]++;
+                }
+            });
+
+            const labels = ['Alta', 'Media', 'Baja'];
+            const data = [priorityCounts['Alta'], priorityCounts['Media'], priorityCounts['Baja']];
+
+            const ctx = document.getElementById('ticketsChart').getContext('2d');
+
+            if (ticketsChart) {
+                ticketsChart.destroy(); // Destruye la instancia anterior del gráfico
+            }
+
+            ticketsChart = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        label: 'Cantidad de Tickets',
+                        data: data,
+                        backgroundColor: [
+                            'rgba(220, 53, 69, 0.7)', // Rojo para Alta
+                            'rgba(255, 193, 7, 0.7)', // Amarillo para Media
+                            'rgba(40, 167, 69, 0.7)'  // Verde para Baja
+                        ],
+                        borderColor: [
+                            'rgba(220, 53, 69, 1)',
+                            'rgba(255, 193, 7, 1)',
+                            'rgba(40, 167, 69, 1)'
+                        ],
+                        borderWidth: 1
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        y: {
+                            beginAtZero: true,
+                            ticks: {
+                                precision: 0 // Asegura que los ticks sean números enteros
+                            }
+                        }
+                    },
+                    plugins: {
+                        legend: {
+                            display: false
+                        },
+                        title: {
+                            display: true,
+                            text: 'Tickets por Prioridad',
+                            font: {
+                                size: 18
+                            }
+                        }
+                    }
+                }
+            });
+        };
+
+        // --- Funciones de Utilidad (Mensajes y Modales) ---
+        const messageBox = document.getElementById('messageBox');
+        const messageText = document.getElementById('messageText');
+
+        function showMessage(message, type) {
+            messageText.textContent = message;
+            messageBox.className = `alert alert-${type} mt-3`;
+            messageBox.classList.remove('d-none');
+            setTimeout(() => {
+                messageBox.classList.add('d-none');
+            }, 5000); // Ocultar después de 5 segundos
+        }
+
+        const confirmationModal = new bootstrap.Modal(document.getElementById('confirmationModal'));
+        const confirmModalBody = document.getElementById('confirmModalBody');
+        const confirmActionButton = document.getElementById('confirmActionButton');
+
+        function showConfirmationModal(message, callback) {
+            confirmModalBody.textContent = message;
+            confirmActionButton.onclick = () => {
+                callback();
+                confirmationModal.hide();
+            };
+            confirmationModal.show();
+        }
+
+        // --- Funciones para cambiar entre formularios de autenticación ---
+        window.showLogin = () => {
+            document.getElementById('loginForm').classList.remove('d-none');
+            document.getElementById('registerForm').classList.add('d-none');
+            document.getElementById('forgotPasswordForm').classList.add('d-none');
+        };
+
+        window.showRegister = () => {
+            document.getElementById('loginForm').classList.add('d-none');
+            document.getElementById('registerForm').classList.remove('d-none');
+            document.getElementById('forgotPasswordForm').classList.add('d-none');
+        };
+
+        window.showForgotPassword = () => {
+            document.getElementById('loginForm').classList.add('d-none');
+            document.getElementById('registerForm').classList.add('d-none');
+            document.getElementById('forgotPasswordForm').classList.remove('d-none');
+        };
+    </script>
+
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f5f5dc; /* Beige claro, color café */
+            color: #3e2723; /* Marrón oscuro */
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .navbar {
+            background-color: #4e342e; /* Marrón oscuro para la barra de navegación */
+            box-shadow: 0 2px 4px rgba(0,0,0,.1);
+        }
+        .navbar-brand, .nav-link {
+            color: #f5f5dc !important; /* Beige claro para el texto de la barra de navegación */
+        }
+        .navbar-brand:hover, .nav-link:hover {
+            color: #d7ccc8 !important; /* Tono más claro al pasar el ratón */
+        }
+
+        .card {
+            border-radius: 0.75rem; /* Bordes redondeados */
+            border: none;
+            overflow: hidden;
+        }
+
+        .card-header {
+            border-bottom: 1px solid rgba(0,0,0,.125);
+            background-color: #8d6e63; /* Marrón medio */
+            color: white;
+            font-weight: 600;
+        }
+
+        .btn-primary {
+            background-color: #6d4c41; /* Marrón café */
+            border-color: #6d4c41;
+            border-radius: 0.5rem;
+            transition: all 0.3s ease;
+        }
+        .btn-primary:hover {
+            background-color: #5d4037;
+            border-color: #5d4037;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 8px rgba(0,0,0,.2);
+        }
+
+        .btn-success {
+            background-color: #66bb6a; /* Verde para éxito */
+            border-color: #66bb6a;
+            border-radius: 0.5rem;
+        }
+        .btn-success:hover {
+            background-color: #4caf50;
+            border-color: #4caf50;
+        }
+
+        .btn-danger {
+            background-color: #ef5350; /* Rojo para peligro */
+            border-color: #ef5350;
+            border-radius: 0.5rem;
+        }
+        .btn-danger:hover {
+            background-color: #e53935;
+            border-color: #e53935;
+        }
+
+        .form-control, .form-select {
+            border-radius: 0.5rem;
+            border: 1px solid #bcaaa4; /* Gris-marrón claro */
+            padding: 0.75rem 1rem;
+        }
+        .form-control:focus, .form-select:focus {
+            border-color: #6d4c41;
+            box-shadow: 0 0 0 0.25rem rgba(109, 76, 65, 0.25);
+        }
+
+        .container-fluid {
+            flex-grow: 1;
+        }
+
+        #login-section, #app-section {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: calc(100vh - 56px); /* Altura de la barra de navegación */
+        }
+
+        .auth-card {
+            max-width: 450px;
+            width: 100%;
+            padding: 2rem;
+            background-color: #fff8e1; /* Crema claro */
+            box-shadow: 0 0.5rem 1rem rgba(0,0,0,.1);
+        }
+
+        .ticket-card .card-body {
+            padding-bottom: 0.5rem;
+        }
+        .ticket-card .list-group-item {
+            padding: 0.5rem 1rem;
+            background-color: transparent;
+            border-color: rgba(0,0,0,.05);
+        }
+        .ticket-card .list-group-item i {
+            margin-right: 0.5rem;
+            color: #6d4c41;
+        }
+
+        .badge {
+            font-size: 0.8em;
+            padding: 0.4em 0.6em;
+            border-radius: 0.35rem;
+        }
+
+        .chart-container {
+            position: relative;
+            height: 300px; /* Altura fija para el gráfico */
+            width: 100%;
+        }
+
+        /* Colores de borde para las tarjetas de ticket basadas en prioridad */
+        .border-danger { border-color: #dc3545 !important; }
+        .border-warning { border-color: #ffc107 !important; }
+        .border-info { border-color: #0dcaf0 !important; }
+
+        /* Colores de fondo para el encabezado de la tarjeta */
+        .bg-danger { background-color: #dc3545 !important; }
+        .bg-warning { background-color: #ffc107 !important; }
+        .bg-info { background-color: #0dcaf0 !important; }
+    </style>
+</head>
+<body>
+    <nav class="navbar navbar-expand-lg navbar-dark">
+        <div class="container-fluid">
+            <a class="navbar-brand" href="#">
+                <i class="fas fa-mug-hot"></i> Exportación de Café S.A. de C.V.
+            </a>
+            <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav" aria-controls="navbarNav" aria-expanded="false" aria-label="Toggle navigation">
+                <span class="navbar-toggler-icon"></span>
+            </button>
+            <div class="collapse navbar-collapse" id="navbarNav">
+                <ul class="navbar-nav ms-auto">
+                    <li class="nav-item">
+                        <span class="nav-link" id="current-user-id"></span>
+                    </li>
+                    <li class="nav-item">
+                        <button class="btn btn-outline-light" onclick="logoutUser()">
+                            <i class="fas fa-sign-out-alt"></i> Cerrar Sesión
+                        </button>
+                    </li>
+                </ul>
+            </div>
+        </div>
+    </nav>
+
+    <div id="messageBox" class="alert alert-dismissible fade show d-none" role="alert">
+        <span id="messageText"></span>
+        <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+    </div>
+
+    <section id="login-section" class="container-fluid">
+        <div class="card auth-card shadow-lg">
+            <div class="card-body">
+                <h3 class="card-title text-center mb-4">Bienvenido</h3>
+
+                <form id="loginForm">
+                    <div class="mb-3">
+                        <label for="loginEmail" class="form-label"><i class="fas fa-envelope"></i> Correo Electrónico</label>
+                        <input type="email" class="form-control" id="loginEmail" placeholder="tu@ejemplo.com" required>
+                    </div>
+                    <div class="mb-3">
+                        <label for="loginPassword" class="form-label"><i class="fas fa-lock"></i> Contraseña</label>
+                        <input type="password" class="form-control" id="loginPassword" placeholder="********" required>
+                    </div>
+                    <div class="d-grid gap-2">
+                        <button type="button" class="btn btn-primary" onclick="loginUser()">
+                            <i class="fas fa-sign-in-alt"></i> Iniciar Sesión
+                        </button>
+                    </div>
+                    <p class="text-center mt-3">
+                        ¿No tienes una cuenta? <a href="#" onclick="showRegister()">Regístrate aquí</a>
+                    </p>
+                    <p class="text-center">
+                        <a href="#" onclick="showForgotPassword()">¿Olvidaste tu contraseña?</a>
+                    </p>
+                </form>
+
+                <form id="registerForm" class="d-none">
+                    <div class="mb-3">
+                        <label for="registerEmail" class="form-label"><i class="fas fa-envelope"></i> Correo Electrónico</label>
+                        <input type="email" class="form-control" id="registerEmail" placeholder="nuevo@ejemplo.com" required>
+                    </div>
+                    <div class="mb-3">
+                        <label for="registerPassword" class="form-label"><i class="fas fa-lock"></i> Contraseña</label>
+                        <input type="password" class="form-control" id="registerPassword" placeholder="********" required>
+                    </div>
+                    <div class="d-grid gap-2">
+                        <button type="button" class="btn btn-success" onclick="registerUser()">
+                            <i class="fas fa-user-plus"></i> Registrar
+                        </button>
+                    </div>
+                    <p class="text-center mt-3">
+                        ¿Ya tienes una cuenta? <a href="#" onclick="showLogin()">Inicia Sesión</a>
+                    </p>
+                </form>
+
+                <form id="forgotPasswordForm" class="d-none">
+                    <div class="mb-3">
+                        <label for="forgotEmail" class="form-label"><i class="fas fa-envelope"></i> Correo Electrónico</label>
+                        <input type="email" class="form-control" id="forgotEmail" placeholder="tu@ejemplo.com" required>
+                    </div>
+                    <div class="d-grid gap-2">
+                        <button type="button" class="btn btn-warning" onclick="resetPassword()">
+                            <i class="fas fa-redo"></i> Restablecer Contraseña
+                        </button>
+                    </div>
+                    <p class="text-center mt-3">
+                        <a href="#" onclick="showLogin()">Volver al Inicio de Sesión</a>
+                    </p>
+                </form>
+            </div>
+        </div>
+    </section>
+
+    <section id="app-section" class="container-fluid py-4 d-none">
+        <div class="row">
+            <div class="col-lg-4 mb-4">
+                <div class="card shadow-sm mb-4">
+                    <div class="card-header">
+                        <h4 class="mb-0"><i class="fas fa-plus-circle"></i> Crear Nuevo Ticket</h4>
+                    </div>
+                    <div class="card-body">
+                        <form id="ticketForm">
+                            <div class="mb-3">
+                                <label for="ticketTitle" class="form-label">Título del Pedido</label>
+                                <input type="text" class="form-control" id="ticketTitle" required>
+                            </div>
+                            <div class="mb-3">
+                                <label for="ticketDescription" class="form-label">Descripción del Pedido</label>
+                                <textarea class="form-control" id="ticketDescription" rows="3" required></textarea>
+                            </div>
+                            <div class="mb-3">
+                                <label for="ticketPriority" class="form-label">Prioridad</label>
+                                <select class="form-select" id="ticketPriority" required>
+                                    <option value="Alta">Alta</option>
+                                    <option value="Media" selected>Media</option>
+                                    <option value="Baja">Baja</option>
+                                </select>
+                            </div>
+                            <div class="mb-3">
+                                <label for="ticketStatus" class="form-label">Estado</label>
+                                <select class="form-select" id="ticketStatus" required>
+                                    <option value="Abierto" selected>Abierto</option>
+                                    <option value="Cerrado">Cerrado</option>
+                                </select>
+                            </div>
+                            <div class="mb-3">
+                                <label for="clientName" class="form-label">Nombre del Cliente</label>
+                                <input type="text" class="form-control" id="clientName" required>
+                            </div>
+                            <div class="mb-3">
+                                <label for="kilograms" class="form-label">Kilogramos de Café</label>
+                                <input type="number" class="form-control" id="kilograms" min="0.01" step="0.01" required>
+                            </div>
+                            <div class="mb-3">
+                                <label for="productType" class="form-label">Tipo de Producto</label>
+                                <select class="form-select" id="productType" required>
+                                    <option value="Arábica">Arábica</option>
+                                    <option value="Robusta">Robusta</option>
+                                    <option value="Mezcla">Mezcla</option>
+                                    <option value="Descafeinado">Descafeinado</option>
+                                </select>
+                            </div>
+                            <div class="mb-3">
+                                <label for="country" class="form-label">País de Envío</label>
+                                <input type="text" class="form-control" id="country" required>
+                            </div>
+                            <div class="d-grid gap-2">
+                                <button type="button" class="btn btn-primary" onclick="createTicket()">
+                                    <i class="fas fa-paper-plane"></i> Crear Ticket
+                                </button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+
+                <div class="card shadow-sm">
+                    <div class="card-header">
+                        <h4 class="mb-0"><i class="fas fa-chart-bar"></i> Estadísticas de Tickets</h4>
+                    </div>
+                    <div class="card-body">
+                        <div class="chart-container">
+                            <canvas id="ticketsChart"></canvas>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="col-lg-8">
+                <div class="d-flex justify-content-between align-items-center mb-4">
+                    <h3 class="mb-0"><i class="fas fa-list-alt"></i> Tickets Activos</h3>
+                    <button class="btn btn-success" onclick="exportToExcel()">
+                        <i class="fas fa-file-excel"></i> Exportar a CSV
+                    </button>
+                </div>
+                <div id="ticket-list" class="row">
+                    </div>
+            </div>
+        </div>
+    </section>
+
+    <div class="modal fade" id="confirmationModal" tabindex="-1" aria-labelledby="confirmationModalLabel" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content">
+                <div class="modal-header bg-warning text-white">
+                    <h5 class="modal-title" id="confirmationModalLabel">Confirmación</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body" id="confirmModalBody">
+                    </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancelar</button>
+                    <button type="button" class="btn btn-danger" id="confirmActionButton">Confirmar</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>
